@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tanda Tangan Pesan make.fun</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0f1220; color: #e8eaf2; margin: 0; padding: 16px; }
+  .card { background: #1a1e33; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  h2 { font-size: 13px; letter-spacing: .08em; color: #9aa3c0; margin: 0 0 10px; text-transform: uppercase; }
+  p, li { font-size: 15px; line-height: 1.5; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; word-break: break-all; }
+  .msgbox { background: #0c0e1a; border: 1px solid #33395c; border-radius: 10px; padding: 12px; white-space: pre-wrap; }
+  textarea { width: 100%; min-height: 110px; background: #0c0e1a; color: #e8eaf2; border: 1px solid #33395c; border-radius: 10px; padding: 10px; font-size: 13px; font-family: ui-monospace, Menlo, monospace; }
+  button { width: 100%; border: 0; border-radius: 12px; padding: 15px; font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 10px; }
+  .primary { background: #e83e8c; color: #fff; }
+  .secondary { background: #2a2f4d; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .warn { color: #ff8fa3; font-weight: 600; }
+  .ok { color: #7be495; font-weight: 600; }
+  .dim { color: #9aa3c0; font-size: 13px; }
+  #diag { font-size: 12px; color: #8b93b0; }
+  .sig { background: #0c0e1a; border: 1px solid #2f6b45; border-radius: 10px; padding: 12px; }
+  ol { margin: 0; padding-left: 20px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Tanda Tangan Pesan make.fun</h1>
+  <p>Halaman ini <b>hanya</b> meminta tanda tangan atas sebuah teks pesan. Bukan transaksi, tanpa fee, tanpa akses ke aset kamu.</p>
+  <p id="diag">Memeriksa lingkungan…</p>
+</div>
+
+<div class="card">
+  <h2>Wallet yang wajib tanda tangan</h2>
+  <p class="mono" id="expected">9Xgkhnnupzysguio7FJJ9xhHz9JiLBPrfXeShKZgJB3G</p>
+  <p class="dim">Tanda tangan dari wallet lain akan ditolak. Pastikan kamu menghubungkan wallet ini.</p>
+</div>
+
+<div class="card">
+  <h2>Pesan yang akan ditandatangani</h2>
+  <div class="msgbox mono" id="msgView">(belum ada pesan — tempel pesan di kotak di bawah, lalu tekan 'Pakai pesan ini')</div>
+  <div id="pasteWrap" style="margin-top:12px">
+    <textarea id="pasteBox" placeholder="Tempel pesan dari Muse di sini…"></textarea>
+    <button class="secondary" id="usePastedBtn" type="button">Pakai pesan ini</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Cara tanda tangan</h2>
+  <ol>
+    <li>Buka halaman ini di <b>dApp browser Jupiter</b> (menu Browser di aplikasi Jupiter).</li>
+    <li>Tekan <b>Hubungkan wallet</b>, pilih wallet yang alamatnya cocok di atas.</li>
+    <li>Tekan <b>Tanda tangani pesan</b>, cek lagi teksnya di wallet, lalu approve.</li>
+    <li>Salin tanda tangan (base58) yang muncul dan kirim balik ke Muse di chat.</li>
+  </ol>
+</div>
+
+<p id="status" class="warn">Belum ada pesan untuk ditandatangani. Tempel pesan dulu di kotak di atas.</p>
+<p id="detectLine" class="dim">Mencari wallet…</p>
+
+<button class="primary" id="connectBtn" type="button">1 · Hubungkan wallet</button>
+<button class="secondary" id="signBtn" type="button" disabled>2 · Tanda tangani pesan ini</button>
+
+<div class="card" id="sigCard" style="display:none; margin-top:14px">
+  <h2>Tanda tangan (base58)</h2>
+  <div class="sig mono" id="sigView"></div>
+  <button class="secondary" id="copyBtn" type="button">Salin tanda tangan</button>
+  <p class="dim">Kirim teks ini balik ke Muse di chat.</p>
+</div>
+
+<p class="dim">Pesan konfirmasi make.fun hanya berlaku beberapa menit. Kalau Muse bilang sudah kedaluwarsa, minta pesan baru dan ulangi dari halaman ini.</p>
+
+<script>
+'use strict';
+var DEFAULT_WALLET = '9Xgkhnnupzysguio7FJJ9xhHz9JiLBPrfXeShKZgJB3G';
+var expectedWallet = DEFAULT_WALLET;
+var messageText = '';
+var connected = null; // { kind: 'standard'|'injected', wallet|provider, account?, address }
+var wsWallets = [];
+var pollTimer = null;
+
+function $(id) { return document.getElementById(id); }
+function setStatus(text, cls) { var el = $('status'); el.textContent = text; el.className = cls || ''; }
+var B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function toBase58(bytes) {
+  var zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  var num = 0n;
+  for (var i = 0; i < bytes.length; i++) num = (num << 8n) | BigInt(bytes[i]);
+  var out = '';
+  while (num > 0n) { out = B58[Number(num % 58n)] + out; num = num / 58n; }
+  return '1'.repeat(zeros) + out;
+}
+function getParams() {
+  var out = {};
+  try {
+    var q = new URLSearchParams(window.location.search);
+    q.forEach(function (v, k) { out[k] = v; });
+    var h = window.location.hash.replace(/^#/, '');
+    if (h) { new URLSearchParams(h).forEach(function (v, k) { if (!(k in out)) out[k] = v; }); }
+  } catch (e) {}
+  return out;
+}
+
+function refreshDiag() {
+  var inFrame = false;
+  try { inFrame = window.self !== window.top; } catch (e) { inFrame = true; }
+  var found = [];
+  if (wsWallets.length) found.push('Wallet Standard: ' + wsWallets.map(function (w) { return w.name || 'tanpa nama'; }).join(', '));
+  ['solana', 'solflare', 'jupiter', 'backpack', 'phantom', 'coin98'].forEach(function (k) {
+    try { if (window[k]) found.push('window.' + k); } catch (e) {}
+  });
+  try { if (window.trustwallet && window.trustwallet.solana) found.push('window.trustwallet.solana'); } catch (e) {}
+  $('diag').textContent = 'Frame: ' + (inFrame ? 'YA (halaman di dalam bingkai — wallet mungkin tidak terlihat)' : 'tidak') +
+    ' · Terdeteksi: ' + (found.length ? found.join(' | ') : 'belum ada');
+}
+
+function loadMessage(text) {
+  messageText = (text || '').trim();
+  if (messageText) {
+    $('msgView').textContent = messageText;
+    setStatus('Pesan dimuat. Hubungkan wallet untuk melanjutkan.', 'ok');
+    $('pasteWrap').style.display = 'none';
+  } else {
+    $('msgView').textContent = '(belum ada pesan — tempel pesan di kotak di bawah, lalu tekan \'Pakai pesan ini\')';
+    setStatus('Belum ada pesan untuk ditandatangani. Tempel pesan dulu di kotak di atas.', 'warn');
+  }
+  updateButtons();
+}
+$('usePastedBtn').addEventListener('click', function () { loadMessage($('pasteBox').value); });
+
+// Wallet Standard mentah (tanpa library, tanpa CDN): dengarkan register-wallet, umumkan app-ready.
+function wsRegister(wallet) {
+  if (!wallet) return function () {};
+  var exists = wsWallets.some(function (w) { return w === wallet || (w.name && w.name === wallet.name); });
+  if (!exists) wsWallets.push(wallet);
+  refreshDetectLine();
+  refreshDiag();
+  return function () { wsWallets = wsWallets.filter(function (w) { return w !== wallet; }); };
+}
+window.addEventListener('wallet-standard:register-wallet', function (event) {
+  try {
+    var cb = event.detail;
+    if (typeof cb === 'function') cb({ register: wsRegister });
+  } catch (e) {}
+});
+function announceAppReady() {
+  try { window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: { register: wsRegister } })); } catch (e) {}
+}
+function wsCandidates() {
+  return wsWallets.filter(function (w) {
+    try {
+      var chains = w.chains || [];
+      var hasSol = chains.some(function (c) { return String(c).indexOf('solana:') === 0; });
+      var feats = w.features || {};
+      return hasSol && feats['solana:signMessage'];
+    } catch (e) { return false; }
+  });
+}
+
+function injectedCandidates() {
+  var list = [];
+  function add(name, provider) {
+    if (provider && typeof provider.signMessage === 'function') list.push({ name: name, provider: provider });
+  }
+  try { add('window.solana', window.solana); } catch (e) {}
+  try { add('window.solflare', window.solflare); } catch (e) {}
+  try { add('window.jupiter', window.jupiter); } catch (e) {}
+  try { add('window.backpack', window.backpack); } catch (e) {}
+  try { add('window.phantom.solana', window.phantom && window.phantom.solana); } catch (e) {}
+  try { add('window.coin98.solana', window.coin98 && window.coin98.solana); } catch (e) {}
+  try { add('window.trustwallet.solana', window.trustwallet && window.trustwallet.solana); } catch (e) {}
+  return list;
+}
+
+function refreshDetectLine() {
+  var n = wsCandidates().length + injectedCandidates().length;
+  if (connected) {
+    $('detectLine').textContent = 'Terhubung: ' + connected.address;
+    $('detectLine').className = 'ok';
+  } else if (n > 0) {
+    $('detectLine').textContent = 'Wallet terdeteksi: ' + n + ' sumber. Tekan Hubungkan wallet.';
+    $('detectLine').className = 'ok';
+  } else {
+    $('detectLine').textContent = 'Mencari wallet… (pastikan dibuka di dApp browser Jupiter, wallet 9Xgk… aktif)';
+    $('detectLine').className = 'dim';
+  }
+}
+function startPolling() {
+  if (pollTimer) return;
+  var ticks = 0;
+  pollTimer = setInterval(function () {
+    ticks++;
+    announceAppReady();
+    refreshDetectLine();
+    refreshDiag();
+    if (ticks >= 40) { clearInterval(pollTimer); pollTimer = null; }
+  }, 500);
+}
+
+function updateButtons() {
+  var canSign = !!messageText && !!connected && connected.address === expectedWallet;
+  $('signBtn').disabled = !canSign;
+  if (connected && connected.address !== expectedWallet) {
+    setStatus('Wallet terhubung (' + connected.address + ') BUKAN wallet yang diminta (' + expectedWallet + '). Ganti ke wallet yang benar di aplikasi wallet, lalu hubungkan lagi.', 'warn');
+  } else if (connected && messageText) {
+    setStatus('Siap. Tekan "Tanda tangani pesan ini", lalu approve di wallet.', 'ok');
+  }
+}
+
+$('connectBtn').addEventListener('click', async function () {
+  setStatus('Menghubungkan…', '');
+  $('connectBtn').disabled = true;
+  try {
+    var deadline = Date.now() + 6000;
+    var found = null;
+    while (Date.now() < deadline && !found) {
+      announceAppReady();
+      var wss = wsCandidates();
+      if (wss.length) { found = { kind: 'standard', wallet: wss[0] }; break; }
+      var injs = injectedCandidates();
+      if (injs.length) { found = { kind: 'injected', entry: injs[0] }; break; }
+      await new Promise(function (r) { setTimeout(r, 400); });
+    }
+    if (!found) {
+      setStatus('Tidak ada wallet yang terdeteksi di browser ini. Buka halaman ini di dApp browser Jupiter (menu Browser di aplikasi Jupiter), pastikan wallet 9Xgk… yang aktif, lalu tekan Hubungkan lagi.', 'warn');
+      return;
+    }
+    if (found.kind === 'standard') {
+      var wallet = found.wallet;
+      var feats = wallet.features;
+      var accounts = wallet.accounts || [];
+      if (feats['standard:connect']) {
+        var res = await feats['standard:connect'].connect();
+        if (res && res.accounts && res.accounts.length) accounts = res.accounts;
+      }
+      if (!accounts.length) throw new Error('Wallet Standard: tidak ada akun.');
+      var acc = accounts.find(function (a) { return a.address === expectedWallet; }) || accounts[0];
+      connected = { kind: 'standard', wallet: wallet, account: acc, address: acc.address };
+    } else {
+      var provider = found.entry.provider;
+      var resp = null;
+      try { resp = await provider.connect({ onlyIfTrusted: false }); } catch (e) { resp = await provider.connect(); }
+      var pubkey = (resp && resp.publicKey) || provider.publicKey;
+      var address = pubkey ? pubkey.toString() : '';
+      if (!address) throw new Error('Provider terhubung tanpa alamat.');
+      connected = { kind: 'injected', provider: provider, address: address };
+    }
+    refreshDetectLine();
+    refreshDiag();
+    updateButtons();
+    if (connected.address !== expectedWallet) {
+      setStatus('Wallet terhubung (' + connected.address + ') BUKAN wallet yang diminta. Ganti wallet di aplikasi, lalu hubungkan lagi.', 'warn');
+    } else {
+      setStatus('Wallet terhubung: ' + connected.address, 'ok');
+    }
+  } catch (e) {
+    setStatus('Gagal menghubungkan: ' + (e && e.message ? e.message : e), 'warn');
+  } finally {
+    $('connectBtn').disabled = false;
+  }
+});
+
+$('signBtn').addEventListener('click', async function () {
+  if (!messageText || !connected) return;
+  if (connected.address !== expectedWallet) { updateButtons(); return; }
+  $('signBtn').disabled = true;
+  setStatus('Menunggu persetujuan di wallet…', '');
+  try {
+    var bytes = new TextEncoder().encode(messageText);
+    var sigBytes = null;
+    if (connected.kind === 'standard') {
+      var out = await connected.wallet.features['solana:signMessage'].signMessage({ account: connected.account, message: bytes });
+      var first = Array.isArray(out) ? out[0] : out;
+      sigBytes = first.signature || first;
+    } else {
+      var res = await connected.provider.signMessage(bytes, 'utf8');
+      sigBytes = res.signature || res;
+    }
+    var sig = toBase58(new Uint8Array(sigBytes));
+    $('sigView').textContent = sig;
+    $('sigCard').style.display = 'block';
+    setStatus('Tanda tangan dibuat. Salin dan kirim balik ke Muse.', 'ok');
+  } catch (e) {
+    setStatus('Tanda tangan gagal/dibatalkan: ' + (e && e.message ? e.message : e), 'warn');
+  } finally {
+    updateButtons();
+  }
+});
+
+$('copyBtn').addEventListener('click', async function () {
+  var text = $('sigView').textContent;
+  try { await navigator.clipboard.writeText(text); $('copyBtn').textContent = 'Tersalin ✓'; }
+  catch (e) {
+    var ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); $('copyBtn').textContent = 'Tersalin ✓'; } catch (e2) {}
+    document.body.removeChild(ta);
+  }
+  setTimeout(function () { $('copyBtn').textContent = 'Salin tanda tangan'; }, 2000);
+});
+
+(function init() {
+  var params = getParams();
+  if (params.wallet) { expectedWallet = params.wallet; $('expected').textContent = expectedWallet; }
+  if (params.message) loadMessage(params.message);
+  announceAppReady();
+  refreshDetectLine();
+  refreshDiag();
+  startPolling();
+})();
+</script>
+</body>
+</html>
